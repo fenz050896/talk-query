@@ -72,7 +72,16 @@ async def generate_sql(question: str, schema: str, style: str = "normal") -> str
         temperature=0,
         max_tokens=500,
     )
-    return response.choices[0].message.content.strip()
+    return _clean_sql(response.choices[0].message.content)
+
+
+def _clean_sql(text: str) -> str:
+    """Strip markdown fences and normalize whitespace from SQL."""
+    import re
+    # Remove ```sql ... ``` or ``` ... ``` fences
+    text = re.sub(r'```(?:sql)?\s*', '', text, flags=re.IGNORECASE)
+    text = text.replace('```', '')
+    return text.strip()
 
 
 async def generate_answer(question: str, schema: str, context: str, style: str = "normal") -> tuple[str, str]:
@@ -102,16 +111,16 @@ async def generate_answer(question: str, schema: str, context: str, style: str =
     if upper.startswith("EXPLAIN:"):
         return ("explain", content[len("EXPLAIN:"):].strip())
     elif upper.startswith("SELECT") or upper.startswith("WITH"):
-        return ("sql", content)
+        return ("sql", _clean_sql(content))
     else:
         # Try to extract SQL from mixed response (narration + SQL)
         import re
         sql_match = re.search(
-            r'\b(SELECT\b[\s\S]+?)(?:;|\Z)', content,
-            re.IGNORECASE,
+            r'\b(SELECT\b[\s\S]+?)(?:;\s*$|\Z)', content,
+            re.IGNORECASE | re.MULTILINE,
         )
         if sql_match:
-            return ("sql", sql_match.group(1).strip())
+            return ("sql", _clean_sql(sql_match.group(1)))
         # If response mentions SELECT but doesn't have real SQL, treat as explain
         return ("explain", content)
 
