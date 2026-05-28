@@ -1,0 +1,5 @@
+.fernet_key
+__pycache__/
+*.pyc
+venv/
+.env
