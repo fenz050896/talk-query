@@ -103,7 +103,7 @@ def format_output(question: str, sql: str, results: dict, response: str) -> dict
 # ── SSE Helpers ─────────────────────────────────────────────
 
 def _sse_event(data: dict) -> str:
-    return f"data: {json.dumps(data)}\n\n"
+    return f"data: {json.dumps(data, default=str)}\n\n"
 
 
 async def _error_event(message: str):
