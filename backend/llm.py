@@ -104,9 +104,15 @@ async def generate_answer(question: str, schema: str, context: str, style: str =
     elif upper.startswith("SELECT") or upper.startswith("WITH"):
         return ("sql", content)
     else:
-        # Fallback: try to extract SQL, otherwise treat as explain
-        if "SELECT" in upper:
-            return ("sql", content)
+        # Try to extract SQL from mixed response (narration + SQL)
+        import re
+        sql_match = re.search(
+            r'\b(SELECT\b[\s\S]+?)(?:;|\Z)', content,
+            re.IGNORECASE,
+        )
+        if sql_match:
+            return ("sql", sql_match.group(1).strip())
+        # If response mentions SELECT but doesn't have real SQL, treat as explain
         return ("explain", content)
 
 
