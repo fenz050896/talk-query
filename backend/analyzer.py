@@ -15,6 +15,25 @@ from llm import client, MODEL
 _analysis_locks: set[str] = set()
 
 
+def _embeddings_exist(connection_id: str) -> bool:
+    """Check if table embeddings have been built for this connection."""
+    try:
+        from embeddings import init_table_embeddings
+        from connections import _get_local_conn
+        init_table_embeddings(connection_id)
+        conn = _get_local_conn()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM table_embeddings WHERE connection_id = ?",
+                (connection_id,),
+            ).fetchone()
+            return row["cnt"] > 0 if row else False
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
 def init_database_profiles_table():
     """Create database_profiles table if it doesn't exist."""
     from connections import _get_local_conn
@@ -225,10 +244,14 @@ async def analyze_database(engine: Engine, connection_id: str, db_type: str, db_
         current_hash = _compute_schema_hash(tables)
         existing = load_profile(connection_id)
         if existing and existing.schema_hash == current_hash:
-            raise RuntimeError(
-                f"Analysis is still valid ({len(existing.table_descriptions)} tables). "
-                "Schema hasn't changed. Use 'refresh database context' to force re-analysis."
-            )
+            # Also check if embeddings exist (might be missing after Phase 2 upgrade)
+            if not _embeddings_exist(connection_id):
+                force = True  # Rebuild to create missing embeddings
+            else:
+                raise RuntimeError(
+                    f"Analysis is still valid ({len(existing.table_descriptions)} tables). "
+                    "Schema hasn't changed. Use 'refresh database context' to force re-analysis."
+                )
 
     _analysis_locks.add(connection_id)
     try:
