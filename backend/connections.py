@@ -174,6 +174,14 @@ def delete_connection(conn_id: str) -> tuple[bool, list[str]]:
 
         conn.execute("DELETE FROM connections WHERE id = ?", (conn_id,))
         conn.commit()
+
+        # Clean up embedding cache
+        try:
+            from embeddings import delete_connection_cache
+            delete_connection_cache(conn_id)
+        except Exception:
+            pass
+
         invalidate_engine(conn_id)
         return True, []
     finally:

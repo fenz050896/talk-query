@@ -286,6 +286,14 @@ async def _analyze_database_impl(engine: Engine, connection_id: str, db_type: st
     )
 
     _save_profile(profile)
+
+    # Build table embeddings for semantic search
+    try:
+        from embeddings import build_table_index
+        build_table_index(connection_id, profile.table_descriptions)
+    except Exception:
+        pass  # Non-critical — chat still works without embeddings
+
     return profile
 
 
