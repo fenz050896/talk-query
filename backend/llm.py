@@ -159,3 +159,86 @@ def format_results_for_llm(results: dict) -> str:
     if results["row_count"] > 20:
         extra = f"\n... and {results['row_count'] - 20} more rows."
     return "\n".join(lines) + extra
+
+
+RE_RANK_PROMPT = """You are a SQL expert and data analyst. Given the user question and the relevant table descriptions below, select the most relevant tables and answer the question.
+
+{context_section}
+
+User question: {question}
+
+Respond in this format:
+- If the question asks ABOUT the database (purpose, structure, relationships, patterns):
+  EXPLAIN: <natural language answer, in the same language as the question>
+
+- If the question asks for specific DATA (list, count, filter, aggregate):
+  TABLES: <list relevant table names, comma separated>
+  SELECT <SQL query>
+
+SQL rules:
+- Only SELECT. No INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE.
+- Always add LIMIT 100 if user doesn't specify a limit."""
+
+
+async def generate_with_re_rank(
+    question: str,
+    db_context: str,
+    relevant_tables: list[dict],
+    style: str = "normal",
+) -> tuple[str, str]:
+    """Re-rank pre-filtered tables + generate SQL/EXPLAIN in one LLM call.
+
+    Args:
+        question: User's natural language question
+        db_context: Tier 1 database summary
+        relevant_tables: List of {table_name, description} from embedding search (top 15)
+        style: Response style
+
+    Returns:
+        (type, content) where type is "sql", "explain", or "error"
+    """
+    # Build the subset of table descriptions
+    table_lines = []
+    for t in relevant_tables:
+        table_lines.append(f"- {t['table_name']}: {t['description']}")
+
+    if table_lines:
+        context_section = f"""Database Summary:
+{db_context}
+
+Relevant Tables:
+{chr(10).join(table_lines)}"""
+    else:
+        context_section = f"Database Summary:\n{db_context}"
+
+    user_message = question
+    if style in ("rtk", "caveman+rtk"):
+        user_message = f"Terse query: {question}"
+
+    response = await client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": RE_RANK_PROMPT.format(
+                context_section=context_section,
+                question=user_message,
+            )},
+        ],
+        temperature=0,
+        max_tokens=1000,
+    )
+    content = response.choices[0].message.content.strip()
+
+    # Parse response
+    upper = content.upper()
+    if upper.startswith("EXPLAIN:"):
+        return ("explain", content[len("EXPLAIN:"):].strip())
+    elif "SELECT" in upper or upper.startswith("WITH"):
+        # Extract SQL — might have TABLES: prefix
+        sql = content
+        if "SELECT" in sql.upper():
+            idx = sql.upper().index("SELECT")
+            sql = sql[idx:]
+        sql = _clean_sql(sql)
+        return ("sql", sql)
+    else:
+        return ("explain", content)
