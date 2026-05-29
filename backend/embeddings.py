@@ -21,7 +21,13 @@ def _get_model() -> SentenceTransformer:
     """Lazy-load embedding model singleton (~470MB, load once)."""
     global _model
     if _model is None:
-        _model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        try:
+            _model = SentenceTransformer(
+                "paraphrase-multilingual-MiniLM-L12-v2",
+                local_files_only=True,
+            )
+        except Exception:
+            _model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
     return _model
 
 
