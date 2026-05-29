@@ -10,9 +10,10 @@ source venv/bin/activate
 python -m uvicorn main:app --host 0.0.0.0 --port 8001 --reload &
 BACKEND_PID=$!
 
-# Start frontend
+# Start frontend (production mode — dev mode has Turbopack overlay issues)
 cd "$SCRIPT_DIR/frontend"
-npm run dev -- -H 0.0.0.0 -p 3001 &
+npm run build 2>&1 | tail -1
+npm run start -- -H 0.0.0.0 -p 3001 &
 FRONTEND_PID=$!
 
 echo ""
