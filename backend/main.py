@@ -10,8 +10,8 @@ from fastapi.responses import StreamingResponse
 
 from db import execute_sql
 from schema import get_schema_ddl, get_schema_compact, get_table_names, get_tables_structured, get_table_sample
-from llm import generate_sql, generate_response, generate_answer
-from analyzer import load_profile, get_relevant_context, get_tier1_only_context, analyze_database
+from llm import generate_sql, generate_response, generate_answer, generate_with_re_rank
+from analyzer import load_profile, analyze_database
 from connections import (
     init_connections_table, get_all_connections, get_connection, get_connection_with_password,
     create_connection, update_connection, delete_connection,
@@ -183,14 +183,74 @@ async def stream_chat(message: str, style: str = "normal",
             yield _sse_event({"type": "done"})
         return
 
+    # Hybrid pipeline: cache → embedding pre-filter → LLM re-rank
+    tier1_context = ""
+    relevant_tables = []
+    cache_hit = None
+
     if profile:
+        # Check query cache for semantically similar question
         try:
-            context = await get_relevant_context(profile, message, engine)
+            from embeddings import cache_lookup, search_tables
+            cache_hit = cache_lookup(conn_row["id"], message)
         except Exception:
-            context = get_tier1_only_context(profile)
-        schema = get_schema_compact(engine) if style in ("rtk", "caveman+rtk") else get_schema_ddl(engine)
-    else:
-        schema = get_schema_compact(engine) if style in ("rtk", "caveman+rtk") else get_schema_ddl(engine)
+            pass
+
+        if cache_hit:
+            # Cache hit: reuse cached SQL, skip LLM for SQL generation
+            yield _sse_event({"type": "sql", "sql": cache_hit["sql"]})
+            yield _sse_event({"type": "status", "status": "executing"})
+
+            try:
+                results = await asyncio.to_thread(execute_sql, cache_hit["sql"], QUERY_TIMEOUT, engine, conn_row["db_type"])
+            except Exception:
+                # SQL might be stale — fall through to LLM generation
+                cache_hit = None
+
+            if cache_hit:
+                yield _sse_event({"type": "status", "status": "generating_response"})
+                response = await generate_response(message, cache_hit["sql"], results, style)
+                output = format_output(message, cache_hit["sql"], results, response)
+                yield _sse_event({"type": "result", **output})
+                yield _sse_event({"type": "done"})
+
+                if conversation_id:
+                    try:
+                        save_message(conversation_id, "user", message, style=style)
+                        save_message(
+                            conversation_id, "assistant", response,
+                            sql=cache_hit["sql"],
+                            result_json=json.dumps({
+                                "columns": results["columns"],
+                                "rows": results["rows"][:20],
+                                "row_count": results["row_count"],
+                            }),
+                            style=style,
+                        )
+                    except Exception:
+                        pass
+                return
+
+        # Cache miss: embedding pre-filter → LLM re-rank + generate
+        try:
+            relevant = search_tables(conn_row["id"], message, k=15)
+        except Exception:
+            relevant = []
+
+        tier1_context = profile.tier1_summary
+
+        if relevant:
+            for r in relevant:
+                relevant_tables.append({
+                    "table_name": r["table_name"],
+                    "description": r.get("description", ""),
+                })
+        else:
+            # Fallback: no embeddings yet, use all tables from profile
+            for name, desc in profile.table_descriptions.items():
+                relevant_tables.append({"table_name": name, "description": desc})
+
+    schema = get_schema_compact(engine) if style in ("rtk", "caveman+rtk") else get_schema_ddl(engine)
 
     # Multi-turn context
     llm_message = message
@@ -205,7 +265,9 @@ async def stream_chat(message: str, style: str = "normal",
 
     try:
         if profile:
-            answer_type, answer_content = await generate_answer(llm_message, schema, context, style)
+            answer_type, answer_content = await generate_with_re_rank(
+                llm_message, tier1_context, relevant_tables, style,
+            )
         else:
             answer_type = "sql"
             answer_content = await generate_sql(llm_message, schema, style)
@@ -260,6 +322,13 @@ async def stream_chat(message: str, style: str = "normal",
     output = format_output(message, sql, results, response)
     yield _sse_event({"type": "result", **output})
     yield _sse_event({"type": "done"})
+
+    # Store successful query in cache
+    try:
+        from embeddings import cache_store
+        cache_store(conn_row["id"], message, sql, response)
+    except Exception:
+        pass
 
     # Persist messages
     if conversation_id:
